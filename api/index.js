@@ -1,16 +1,24 @@
-// Simple in-memory items API for Vercel serverless
-// NOTE: serverless functions are stateless across cold starts; in-memory data may not persist.
+// Testing-friendly Vercel serverless API
+// Endpoints: /api/ (or /api/ping) -> pong, /api/echo -> reflects request, /api/items -> sample items
+// CORS: reflects Origin header if present (allows testing from browsers). For production, restrict allowed origins.
 
 const items = global.__items ||= [
   { id: 1, name: 'Item One' },
   { id: 2, name: 'Item Two' }
 ];
 
+function sendJSON(res, obj, code = 200) {
+  res.statusCode = code;
+  res.end(JSON.stringify(obj));
+}
+
 module.exports = (req, res) => {
-  // CORS
-  res.setHeader('Access-Control-Allow-Origin', '*');
+  const origin = req.headers.origin || '*';
+  res.setHeader('Access-Control-Allow-Origin', origin);
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  // Allow credentials when origin is provided
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
 
   if (req.method === 'OPTIONS') {
     res.statusCode = 204;
@@ -19,57 +27,58 @@ module.exports = (req, res) => {
   }
 
   res.setHeader('Content-Type', 'application/json');
-  const { method, url } = req;
+  const { method, url, headers } = req;
 
-  if (!url || url === '/') {
-    return res.end(JSON.stringify({ message: 'Sample API', uptime: process.uptime() }));
+  // Root / or /ping
+  if (!url || url === '/' || url === '/ping') {
+    return sendJSON(res, { message: 'pong', uptime: process.uptime(), origin: headers.origin || null });
   }
 
-  const m = url.match(/^\/items(?:\/(\d+))?$/);
-  if (!m) {
-    res.statusCode = 404;
-    return res.end(JSON.stringify({ error: 'Not found' }));
-  }
-
-  const id = m[1] ? Number(m[1]) : null;
-
-  if (method === 'GET') {
-    if (id) {
-      const item = items.find(i => i.id === id);
-      if (!item) {
-        res.statusCode = 404;
-        return res.end(JSON.stringify({ error: 'Not found' }));
-      }
-      return res.end(JSON.stringify(item));
-    }
-    return res.end(JSON.stringify(items));
-  }
-
-  if (method === 'POST' && !id) {
+  // Echo endpoint for frontend testing
+  if (url.startsWith('/echo')) {
     let body = '';
-    req.on('data', chunk => (body += chunk));
+    req.on('data', c => body += c);
     req.on('end', () => {
-      let parsed;
-      try {
-        parsed = JSON.parse(body || '{}');
-      } catch (e) {
-        res.statusCode = 400;
-        return res.end(JSON.stringify({ error: 'invalid json' }));
-      }
-      const { name } = parsed;
-      if (!name) {
-        res.statusCode = 400;
-        return res.end(JSON.stringify({ error: 'name required' }));
-      }
-      const newId = items.length ? Math.max(...items.map(i => i.id)) + 1 : 1;
-      const item = { id: newId, name };
-      items.push(item);
-      res.statusCode = 201;
-      return res.end(JSON.stringify(item));
+      let parsed = null;
+      try { parsed = body ? JSON.parse(body) : null; } catch (e) { parsed = { _raw: body }; }
+      const urlObj = new URL(req.url, 'http://localhost');
+      const query = Object.fromEntries(urlObj.searchParams.entries());
+      return sendJSON(res, { method, headers, query, body: parsed });
     });
     return;
   }
 
-  res.statusCode = 405;
-  res.end(JSON.stringify({ error: 'Method not allowed' }));
+  // Items list/CRUD
+  const m = url.match(/^\/items(?:\/(\d+))?$/);
+  if (m) {
+    const id = m[1] ? Number(m[1]) : null;
+    if (method === 'GET') {
+      if (id) {
+        const item = items.find(i => i.id === id);
+        if (!item) return sendJSON(res, { error: 'Not found' }, 404);
+        return sendJSON(res, item);
+      }
+      return sendJSON(res, items);
+    }
+
+    if (method === 'POST' && !id) {
+      let body = '';
+      req.on('data', c => body += c);
+      req.on('end', () => {
+        let parsed;
+        try { parsed = body ? JSON.parse(body) : {}; } catch (e) { return sendJSON(res, { error: 'invalid json' }, 400); }
+        const { name } = parsed;
+        if (!name) return sendJSON(res, { error: 'name required' }, 400);
+        const newId = items.length ? Math.max(...items.map(i => i.id)) + 1 : 1;
+        const item = { id: newId, name };
+        items.push(item);
+        return sendJSON(res, item, 201);
+      });
+      return;
+    }
+
+    return sendJSON(res, { error: 'Method not allowed' }, 405);
+  }
+
+  return sendJSON(res, { error: 'Not found' }, 404);
 };
